@@ -49,11 +49,12 @@ void configureAK4396Register(unsigned int address, unsigned int data);
 void initDMA(void);
 void initSPDIF(void);
 void clearDAIpins(void);
-void processSamples(void);
+void processSamples(int delaySpeed);
 
 void delay(int times);
 
 int rx0a_buf[BUFFER_LENGTH] = {0};		// SPORT0 receive buffer a - also used for transmission
+float rx0a_buf_f[BUFFER_LENGTH] = {0.0};
 int tx1a_buf_dummy[BUFFER_LENGTH/2] = {0};
 
 /* 
@@ -76,9 +77,10 @@ int tx1a_tcb[8]  = {0, 0, 0, 0, 0, BUFFER_LENGTH, 1, (int) rx0a_buf};				// SPOR
 
 int tx1a_delay_tcb[8]  = {0, 0, 0, 0, 0, BUFFER_LENGTH/2, 1, (int) tx1a_buf_dummy};	// SPORT1 transmit a tcb to DAC
 
+int counter = 0;
 int dsp = 0;
 int delay_ptr = 0;
-int delay_buffer[2*DELAY_LENGTH] = {0};
+float delay_buffer[2*DELAY_LENGTH] = {0};
 
 void main(void) {
 	initPLL_SDRAM();
@@ -110,7 +112,7 @@ void main(void) {
 	initSPDIF();
 
 	while(1){
-		processSamples();
+		processSamples(4);
 	}  
 }
 
@@ -199,7 +201,7 @@ void initSPI(unsigned int SPI_Flag)
 {
 	// Configure the SPI Control registers
     // First clear a few registers
-    *pSPICTL = (TXFLSH | RXFLSH) ; //Clear TXSPI and RXSPI
+    *pSPICTL  =(TXFLSH | RXFLSH) ; //Clear TXSPI and RXSPI
     *pSPIFLG = 0; //Clear the slave select
 
     //BAUDR is bits 15-1 and 0 is reserved
@@ -263,7 +265,8 @@ void initDMA() {
 
 	rx0a_tcb[4] = *pCPSP0A = ((int) rx0a_tcb  + 7) & 0x7FFFF | (1<<19);
 	tx1a_tcb[4] = ((int) tx1a_tcb  + 7) & 0x7FFFF | (1<<19);
-	tx1a_delay_tcb[4] = *pCPSP1A = ((int) tx1a_tcb  + 7) & 0x7FFFF | (1<<19);
+	tx1a_delay_tcb[4] = ((int) tx1a_tcb  + 7) & 0x7FFFF | (1<<19);
+	*pCPSP1A = ((int) tx1a_delay_tcb  + 7) & 0x7FFFF | (1<<19);
 
 	// SPORT0 as receiver, SLEN is confusing still...
 	*pSPCTL0 = OPMODE | L_FIRST | SLEN24 | SPEN_A | SCHEN_A | SDEN_A;
@@ -337,23 +340,129 @@ void clearDAIpins(void)
     SRU(LOW, PBEN20_I);
 }
 
-void processSamples() 
+void processSamples(int delaySpeed) 
 {
 	while( ( ((int)rx0a_buf + dsp) & BUFFER_MASK ) != ( *pIISP0A & BUFFER_MASK ) ) {
 
+		counter = (counter + 1) % delaySpeed;
 		/*  
 		delay_ptr is putting what rx just took in into the delay_buffer.
 		once the delay length is satisfied, dsp pointer is adding to the receive buffer what rx
 		already put there PLUS what's just ahead of where delay_ptr is now. this way, 
 		the desired delay time is satisfied constantly.
 		*/
-		delay_buffer[delay_ptr] = rx0a_buf[dsp];		// fill up the delay buffer
+		
+		/* ----------------- feedback w/ ints and floats ---------- */
+		if (counter == 0){
+			if (rx0a_buf[dsp] & 0x00800000)
+				rx0a_buf[dsp] |= 0xFF000000;
 
-		delay_ptr = (delay_ptr + 1)%DELAY_LENGTH;
+			rx0a_buf_f[dsp] = (float)rx0a_buf[dsp];
 
-		rx0a_buf[dsp] += delay_buffer[ delay_ptr ];
+			delay_buffer[delay_ptr] = 0.5*delay_buffer[delay_ptr] + rx0a_buf_f[dsp];
+
+			delay_ptr = (delay_ptr + 1)%DELAY_LENGTH;
+
+			rx0a_buf_f[dsp] = delay_buffer[ delay_ptr ];
+
+			rx0a_buf[dsp] = (int)rx0a_buf_f[dsp];
+		}
+
+
+		rx0a_buf[dsp] &= 0x00FFFFFF;
+		
 
     	dsp = (dsp + 1)%BUFFER_LENGTH;                  // increment the buffer_ptr
+
 	}
     return;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/* --------------- no feedback w/ ints and floats ------------ */
+		/*
+		// set the float rx buffer = to int rx buffer
+		rx0a_buf_f[dsp] = (float)rx0a_buf[dsp];
+
+		// put the float rx buffer value into delay buffer
+		delay_buffer[delay_ptr] = (float)rx0a_buf[dsp];		// fill up the delay buffer
+
+		// delay ptr now indexes the oldest value in the delay buffer
+		delay_ptr = (delay_ptr + 1)%DELAY_LENGTH;
+
+		// float rx buffer equals itself plus the oldest value in delay buffer
+		rx0a_buf_f[dsp] += delay_buffer[ delay_ptr ];
+
+		// finish with setting rx int buffer = rx float buffer
+		rx0a_buf[dsp] = (int)rx0a_buf_f[dsp];
+		*/
+
+
+
+	/* ------------------ feedback only ints, 1 for attenuation ----------- */
+		/*
+		// feedback version
+		delay_ptr = (delay_ptr + 1)%DELAY_LENGTH;
+
+		rx0a_buf[dsp] += 1 * delay_buffer[ delay_ptr ];
+
+		delay_buffer[delay_ptr] = rx0a_buf[dsp];		// fill up the delay buffer
+		*/
