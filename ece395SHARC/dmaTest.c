@@ -35,7 +35,7 @@
 #define AK4396_LCH_ATT_DEF (0xFF)
 #define AK4396_RCH_ATT_DEF (0xFF)
 
-#define BUFFER_LENGTH 256
+#define BUFFER_LENGTH 512
 
 // for masking out possible address offset when only interested in pointer relative positions			
 #define BUFFER_MASK 0x000000FF    
@@ -45,21 +45,31 @@
 // Configure the PLL for a core-clock of 266MHz and SDCLK of 133MHz
 extern void initPLL_SDRAM(void);
 
-// local functions
+// local setup functions
 void initSRU(void);
 void initSPI(unsigned int SPI_Flag);
 void configureAK4396Register(unsigned int address, unsigned int data);
 void initDMA(void);
 void initSPDIF(void);
 void clearDAIpins(void);
+
+// dsp functions
 void delayWithFeedback(int delaySpeed);
 void firFilter(void);
 
 void delay(int times);
 
-int rx0a_buf[BUFFER_LENGTH] = {0};		// SPORT0 receive buffer a - also used for transmission
-double rx0a_buf_f[BUFFER_LENGTH] = {0.0};
-int tx1a_buf_dummy[BUFFER_LENGTH/2] = {0};
+// SPORT0 receive buffer a - also used for transmission
+int rx0a_buf[BUFFER_LENGTH] = {0};
+
+// buffer for storing floats	
+double float_buffer[BUFFER_LENGTH] = {0.0};
+
+// SPORT1 transmit dummy buffer - for making sure tx is behind rx
+//int tx1a_buf_dummy[BUFFER_LENGTH/2] = {0};
+
+// SPORT1 transmit buffer	
+int tx1a_buf[BUFFER_LENGTH] = {0};
 
 /* 
 TCB format:       ECx (length of destination buffer),
@@ -74,10 +84,10 @@ TCB format:       ECx (length of destination buffer),
 				  IIx (source buffer index (initialized to start address)) 
 */
 
-int rx0a_tcb[8]  = {0, 0, 0, 0, 0, BUFFER_LENGTH, 1, (int) rx0a_buf};				// SPORT0 receive a tcb from SPDIF
-int tx1a_tcb[8]  = {0, 0, 0, 0, 0, BUFFER_LENGTH, 1, (int) rx0a_buf};				// SPORT1 transmit a tcb to DAC
+int rx0a_tcb[8]  = {0,0,0,0, 0, BUFFER_LENGTH, 1, 0};				// SPORT0 receive a tcb from SPDIF
+int tx1a_tcb[8]  = {0,0,0,0, 0, BUFFER_LENGTH, 1, 0};				// SPORT1 transmit a tcb to DAC
 
-int tx1a_delay_tcb[8]  = {0, 0, 0, 0, 0, BUFFER_LENGTH/2, 1, (int) tx1a_buf_dummy};	// SPORT1 transmit a tcb to DAC
+int tx1a_delay_tcb[8]  = {0, 0, 0, 0, 0, BUFFER_LENGTH/2, 1, 0};	// SPORT1 transmit a tcb to DAC
 
 int counter = 0;
 int dsp = 0;
@@ -85,6 +95,7 @@ int delay_ptr = 0;
 double delay_buffer[2*DELAY_LENGTH] = {0};
 
 void main(void) {
+
 	initPLL_SDRAM();
 
 	initSPI(DS0EN);
@@ -180,10 +191,10 @@ void initSRU()
 	SRU(DAI_PB03_O, SPORT0_FS_I);
 	SRU(DAI_PB03_O, SPORT1_FS_I);
 
-	// SPORT0 receives from SPDIF (comment back in to test talkthrough)
+	// SPORT0 receives from SPDIF 
 	SRU(DIR_DAT_O, SPORT0_DA_I);
 
-	// SPORT1 outputs to the DAC (comment back in to test talkthrough)
+	// SPORT1 outputs to the DAC
 	SRU(SPORT1_DA_O, DAI_PB04_I);
 	SRU(HIGH, PBEN04_I);
 
@@ -266,16 +277,49 @@ void initDMA() {
 	*pSPCTL0 = 0;
 	*pSPCTL1 = 0;
 
-	rx0a_tcb[4] = *pCPSP0A = ((int) rx0a_tcb  + 7) & 0x7FFFF | (1<<19);
+	// where rx goes next (itself)
+	rx0a_tcb[4] = ((int) rx0a_tcb  + 7) & 0x7FFFF | (1<<19);
+	// where rx fills
+	rx0a_tcb[7] = (unsigned int) rx0a_buf;
+
+	// where SPORT0 fills first (and always)
+	*pCPSP0A = ((int) rx0a_tcb  + 7) & 0x7FFFF | (1<<19);
+
+	// where tx goes next (itself)
 	tx1a_tcb[4] = ((int) tx1a_tcb  + 7) & 0x7FFFF | (1<<19);
-	tx1a_delay_tcb[4] = ((int) tx1a_tcb  + 7) & 0x7FFFF | (1<<19);
-	*pCPSP1A = ((int) tx1a_delay_tcb  + 7) & 0x7FFFF | (1<<19);
+	// where tx gets data
+	tx1a_tcb[7] = (unsigned int) tx1a_buf;
 
-	// SPORT0 as receiver, SLEN is confusing still...
-	*pSPCTL0 = OPMODE | L_FIRST | SLEN24 | SPEN_A | SCHEN_A | SDEN_A;
+	// where tx dummy goes next (regular tx)
+	//tx1a_delay_tcb[4] = ((int) tx1a_tcb  + 7) & 0x7FFFF | (1<<19);
+	// where tx dummy gets data
+	//tx1a_delay_tcb[7] = (unsigned int) tx1a_buf_dummy;
 
+	// where SPORT1 gets from first
+	//*pCPSP1A = ((int) tx1a_delay_tcb  + 7) & 0x7FFFF | (1<<19);
+	*pCPSP1A = ((int) tx1a_tcb  + 7) & 0x7FFFF | (1<<19);
+
+
+	// SPORT0 as receiver
+	*pSPCTL0 = 	SPEN_A | 	// enable channel A
+				SDEN_A |	// enable channel A DMA
+				SCHEN_A | 	// enable channel A DMA chaining
+				OPMODE |	// enable I2S mode 
+				L_FIRST | 	// I2S sends left first
+				SLEN24; 	// 24-bit word length
+
+				
 	// SPORT1 as transmitter
-	*pSPCTL1 = OPMODE | L_FIRST | SLEN24 | SPEN_A | SCHEN_A | SDEN_A | SPTRAN;
+	*pSPCTL1 = 	SPEN_A |	// enable channel A
+				SDEN_A |	// enable channel A DMA
+				SCHEN_A |	// enable channel A DMA chaining
+				OPMODE | 	// enable I2S mode 
+				L_FIRST | 	// I2S sends left first
+				SLEN24 | 	// 24-bit word length
+				SPTRAN;		// set as transmitter
+				 
+				 
+				
 }
 
 void delay(int times)
@@ -348,89 +392,85 @@ void delayWithFeedback(int delaySpeed)
 	while( ( ((int)rx0a_buf + dsp) & BUFFER_MASK ) != ( *pIISP0A & BUFFER_MASK ) ) {
 
 		counter = (counter + 1) % delaySpeed;
-		/*  
-		delay_ptr is putting what rx just took in into the delay_buffer.
-		once the delay length is satisfied, dsp pointer is adding to the receive buffer what rx
-		already put there PLUS what's just ahead of where delay_ptr is now. this way, 
-		the desired delay time is satisfied constantly.
-		*/
 		
-		/* ----------------- feedback w/ ints and floats ---------- */
-		if (counter == 0){
+		// delay_ptr is putting what rx just took in into the delay_buffer.
+		// once the delay length is satisfied, dsp pointer is adding to the receive buffer what rx
+		// already put there PLUS what's just ahead of where delay_ptr is now. this way, 
+		// the desired delay time is satisfied constantly.
+		
+		
+		// ----------------- feedback w/ ints and floats ---------- //
+
+		if (counter == 0) {
+
 			if (rx0a_buf[dsp] & 0x00800000)			// is rx negative?
 				rx0a_buf[dsp] |= 0xFF000000;		// sign-extend it
 
-			rx0a_buf_f[dsp] = (float)rx0a_buf[dsp];
+			// get current input as a float into float buffer
+			float_buffer[dsp] = (float)rx0a_buf[dsp];
 
-			delay_buffer[delay_ptr] = 0.5*delay_buffer[delay_ptr] + rx0a_buf_f[dsp];
+			// write current input + attenuated delay into delay buffer at delay_ptr
+			delay_buffer[delay_ptr] = 0.5*delay_buffer[delay_ptr] + float_buffer[dsp];
 
+			// increment delay_ptr - now points to oldest spot in delay buffer
 			delay_ptr = (delay_ptr + 1)%DELAY_LENGTH;
 
-			rx0a_buf_f[dsp] = delay_buffer[ delay_ptr ];
+			// put the oldest delay value (from 1 delay ago) into receive float buffer
+			float_buffer[dsp] = delay_buffer[ delay_ptr ];
 
-			rx0a_buf[dsp] = (int)rx0a_buf_f[dsp];
+			// get the float back into int format for tx to play it back coming up
+			tx1a_buf[dsp] = (int)float_buffer[dsp];
 		}
 
+		// make sure it's 24 bit for 24 bit i2s
+		tx1a_buf[dsp] &= 0x00FFFFFF;			
 
-		rx0a_buf[dsp] &= 0x00FFFFFF;					// make sure it's 24 bit for 24 bit i2s
-		
-
-    	dsp = (dsp + 1)%BUFFER_LENGTH;                  // increment the buffer_ptr
+		// increment the buffer_ptr
+    	dsp = (dsp + 1)%BUFFER_LENGTH;                  
 
 	}
     return;
 }
 
 void firFilter() {
-	//printf("function entered\n");
 
 	double acc = 0.0;
 
-	// make sure dsp is not caught up to receive
+	// make sure dsp is behind rx
 	while( ( ((int)rx0a_buf + dsp) & BUFFER_MASK ) != ( *pIISP0A & BUFFER_MASK ) ) {
 
+		int i = 0;
 
-		//printf("outer condition passed\n");
+		if (rx0a_buf[dsp] & 0x00800000)			// is rx negative?
+			rx0a_buf[dsp] |= 0xFF000000;		// sign-extend it
+
+		// get input as a float
+		float_buffer[dsp] = (double)rx0a_buf[dsp];
+
+		//printf("float_buffer[%d] = %f\n", dsp, float_buffer[dsp]);
 		
-		// make sure dsp is at least FILTER_LENGTH ahead of transmit
-		/*
-		if(((int)rx0a_buf + dsp - (int)*pIISP1A) < 0){
-				printf("circled: dsp ahead of tx by: %d\n", 512 + ((int)rx0a_buf + dsp - (int)*pIISP1A) );
-			}
-			else
-				printf("dsp ahead of tx by: %d\n", (int)rx0a_buf + dsp - (int)*pIISP1A );
-
-			printf("\n");
-		*/
-		if( BUFFER_LENGTH - abs((int)rx0a_buf + dsp - (int)*pIISP1A) > FILTER_LENGTH) {
-		//if( ( ((int)rx0a_buf + dsp) & BUFFER_MASK ) > ( ( *pIISP1A + FILTER_LENGTH ) & BUFFER_MASK ) )  {
-
-			//printf("inner condition passed\n");
-			int i = 0;
-
-			if (rx0a_buf[dsp] & 0x00800000)			// is rx negative?
-				rx0a_buf[dsp] |= 0xFF000000;		// sign-extend it
-
-			//printf("rx0a_buf[%d]: %p\n", dsp, rx0a_buf[dsp]);
-			rx0a_buf_f[dsp] = (double)rx0a_buf[dsp];
-
-			for (i=0; i<FILTER_LENGTH; i++) {
-				acc += rx0a_buf_f[dsp - i] * coeffs[i];
-			}
-
-			// output equals the accumulator value now
-			rx0a_buf[dsp - FILTER_LENGTH] = (int)acc;
-
-			// make sure it's 24 bit for 24 bit i2s
-			rx0a_buf[dsp - FILTER_LENGTH] &= 0x00FFFFFF;					
-
-			// increment the buffer_ptr
-    		dsp = (dsp + 1)%BUFFER_LENGTH;  
-    		return;              
+		// convolution of input (going bakcwards) and coeffs (going forward)
+		for (i=0; i<FILTER_LENGTH; i++) {
+			acc += float_buffer[dsp - i] * coeffs[i];
 		}
+		
+		// put the output (acc) into the tx buffer
+		
+		//The filter is working but there's a deadzone 
+		//in the output signal.  Don't understand why.
+		
+		tx1a_buf[dsp] = (int)acc;
+		//tx1a_buf[dsp] = rx0a_buf[dsp];
 
-	}
-	
+		// make sure it's 24 bit for 24 bit i2s
+		tx1a_buf[dsp] &= 0x00FFFFFF;					
+
+		// increment the buffer_ptr
+		dsp = (dsp + 1)%BUFFER_LENGTH;  
+
+		return;              
+
+	}	
 }
 
 
