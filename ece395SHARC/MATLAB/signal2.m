@@ -8,7 +8,7 @@ f2 = 1200;
 
 % filter
 FILTER_LENGTH = 64;
-cutoff = 0.05;
+cutoff = 0.02;
 coeffs = fir1(FILTER_LENGTH, cutoff, 'low');
 
 %freqz(coeffs,1);

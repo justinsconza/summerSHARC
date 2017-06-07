@@ -35,10 +35,10 @@
 #define AK4396_LCH_ATT_DEF (0xFF)
 #define AK4396_RCH_ATT_DEF (0xFF)
 
-#define BUFFER_LENGTH 512
+#define BUFFER_LENGTH 256
 
 // for masking out possible address offset when only interested in pointer relative positions			
-#define BUFFER_MASK 0x000001FF    
+#define BUFFER_MASK 0x000000FF    
 
 #define DELAY_LENGTH 12000
 
@@ -56,6 +56,8 @@ void clearDAIpins(void);
 // dsp functions
 void delayWithFeedback(int delaySpeed);
 void firFilter(void);
+void formatInput(void);
+void formatOutput(void);
 
 void delay(int times);
 
@@ -92,6 +94,7 @@ int tx1a_delay_tcb[8]  = {0, 0, 0, 0, 0, BUFFER_LENGTH/2, 1, 0};	// SPORT1 trans
 int counter = 0;
 int dsp = 0;
 int delay_ptr = 0;
+double potato;
 double delay_buffer[2*DELAY_LENGTH] = {0};
 
 void main(void) {
@@ -125,8 +128,13 @@ void main(void) {
 	initSPDIF();
 
 	while(1){
-		firFilter();
-		//delayWithFeedback(4);
+		while( ( ((int)rx0a_buf + dsp) & BUFFER_MASK ) != ( *pIISP0A & BUFFER_MASK ) ) {
+			formatInput();
+			
+			delayWithFeedback(0);
+			firFilter();
+			formatOutput();
+		}
 	}  
 }
 
@@ -389,104 +397,65 @@ void clearDAIpins(void)
 
 void delayWithFeedback(int delaySpeed) 
 {
-	while( ( ((int)rx0a_buf + dsp) & BUFFER_MASK ) != ( *pIISP0A & BUFFER_MASK ) ) {
+	// delay_ptr is putting what rx just took in into the delay_buffer.
+	// once the delay length is satisfied, dsp pointer is adding to the receive buffer what rx
+	// already put there PLUS what's just ahead of where delay_ptr is now. this way, 
+	// the desired delay time is satisfied constantly.
+	
+	
+	// ----------------- feedback w/ ints and floats ---------- //
 
+	if (delaySpeed > 0)
 		counter = (counter + 1) % delaySpeed;
-		
-		// delay_ptr is putting what rx just took in into the delay_buffer.
-		// once the delay length is satisfied, dsp pointer is adding to the receive buffer what rx
-		// already put there PLUS what's just ahead of where delay_ptr is now. this way, 
-		// the desired delay time is satisfied constantly.
-		
-		
-		// ----------------- feedback w/ ints and floats ---------- //
 
-		if (counter == 0) {
+	if (counter == 0) {
 
-			if (rx0a_buf[dsp] & 0x00800000)			// is rx negative?
-				rx0a_buf[dsp] |= 0xFF000000;		// sign-extend it
+		//*** write current input + attenuated delay into delay buffer at delay_ptr
+		delay_buffer[delay_ptr] = 0.5*delay_buffer[delay_ptr] + float_buffer[dsp];
 
-			// get current input as a float into float buffer
-			float_buffer[dsp] = (float)rx0a_buf[dsp];
+		//*** increment delay_ptr - now points to oldest spot in delay buffer
+		delay_ptr = (delay_ptr + 1)%DELAY_LENGTH;
 
-			// write current input + attenuated delay into delay buffer at delay_ptr
-			delay_buffer[delay_ptr] = 0.5*delay_buffer[delay_ptr] + float_buffer[dsp];
-
-			// increment delay_ptr - now points to oldest spot in delay buffer
-			delay_ptr = (delay_ptr + 1)%DELAY_LENGTH;
-
-			// put the oldest delay value (from 1 delay ago) into receive float buffer
-			float_buffer[dsp] = delay_buffer[ delay_ptr ];
-
-			// get the float back into int format for tx to play it back coming up
-			tx1a_buf[dsp] = (int)float_buffer[dsp];
-		}
-
-		// make sure it's 24 bit for 24 bit i2s
-		tx1a_buf[dsp] &= 0x00FFFFFF;			
-
-		// increment the buffer_ptr
-    	dsp = (dsp + 1)%BUFFER_LENGTH;                  
-
+		//*** put the oldest delay value (from 1 delay ago) into receive float buffer
+	    float_buffer[dsp] = potato = delay_buffer[ delay_ptr ];
 	}
+
     return;
 }
 
 void firFilter() {
 
 	double acc = 0.0;
+	int i = 0;
 
-	// make sure dsp is behind rx
-	while( ( ((int)rx0a_buf + dsp) & BUFFER_MASK ) != ( *pIISP0A & BUFFER_MASK ) ) {
+	// convolution of input (going bakcwards) and coeffs (going forward)
+	for (i = 0 ; i < FILTER_LENGTH ; i++)
+		acc += float_buffer[ (dsp - i + BUFFER_LENGTH) % BUFFER_LENGTH ] * coeffs[i];
 
-		int i = 0;
+	potato = acc;
 
-		if (rx0a_buf[dsp] & 0x00800000)			// is rx negative?
-			rx0a_buf[dsp] |= 0xFF000000;		// sign-extend it
-
-		// get input as a float
-		float_buffer[dsp] = (double)rx0a_buf[dsp];
-
-		//printf("float_buffer[%d] = %f\n", dsp, float_buffer[dsp]);
-		
-		// convolution of input (going bakcwards) and coeffs (going forward)
-		for (i=0; i<FILTER_LENGTH; i++) {
-			acc += float_buffer[ (dsp - i + BUFFER_LENGTH) % BUFFER_LENGTH ] * coeffs[i];
-		}
-		
-		// put the output (acc) into the tx buffer
-		
-		//The filter is working but there's a deadzone 
-		//in the output signal.  Don't understand why.
-		
-		tx1a_buf[dsp] = (int)acc;
-		//tx1a_buf[dsp] = rx0a_buf[dsp];
-
-		// make sure it's 24 bit for 24 bit i2s
-		tx1a_buf[dsp] &= 0x00FFFFFF;					
-
-		// increment the buffer_ptr
-		dsp = (dsp + 1)%BUFFER_LENGTH;  
-
-		return;              
-
-	}	
+	return;              
 }
 
+void formatInput(void){
 
+	if (rx0a_buf[dsp] & 0x00800000)			// is rx negative?
+		rx0a_buf[dsp] |= 0xFF000000;		// sign-extend it
 
+    float_buffer[dsp] = potato = (double)rx0a_buf[dsp];
 
+    return;
+}
 
+void formatOutput(void){
 
+	tx1a_buf[dsp] = (int)potato;
+	tx1a_buf[dsp] &= 0x00FFFFFF;	
 
+	dsp = (dsp + 1)%BUFFER_LENGTH;
 
-
-
-
-
-
-
-
+	return;
+}
 
 
 
