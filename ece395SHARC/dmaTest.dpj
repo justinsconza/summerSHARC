@@ -131,6 +131,8 @@
 			<files>
 				<file name=".\coeffs.h">
 				</file>
+				<file name=".\coeffsIIR.h">
+				</file>
 				<file name=".\dmaTest.c">
 					<file-configurations>
 						<file-configuration name="Debug">

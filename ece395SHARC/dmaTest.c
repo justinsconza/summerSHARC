@@ -6,6 +6,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include "coeffs.h"
+#include "coeffsIIR.h"
 #include <math.h>
 
  
@@ -56,6 +57,7 @@ void clearDAIpins(void);
 // dsp functions
 void delayWithFeedback(int delaySpeed);
 void firFilter(void);
+void iirFilter(void);
 void formatInput(void);
 void formatOutput(void);
 
@@ -91,11 +93,23 @@ int tx1a_tcb[8]  = {0,0,0,0, 0, BUFFER_LENGTH, 1, 0};				// SPORT1 transmit a tc
 
 int tx1a_delay_tcb[8]  = {0, 0, 0, 0, 0, BUFFER_LENGTH/2, 1, 0};	// SPORT1 transmit a tcb to DAC
 
-int counter = 0;
+// ------------------------ general globals ------------- //
+// main processing index
 int dsp = 0;
-int delay_ptr = 0;
+// when each effect plays hot potato with the eventual output sample
 double potato;
+
+// ------------------------ delay globals --------------- //
+// delay buffer index
+int delay_ptr = 0;
+// determines delay speed
+int counter = 0;
+// buffer for storing delay samples
 double delay_buffer[2*DELAY_LENGTH] = {0};
+
+// ----------------------- IIR globals ------------------ //
+
+
 
 void main(void) {
 
@@ -131,8 +145,9 @@ void main(void) {
 		while( ( ((int)rx0a_buf + dsp) & BUFFER_MASK ) != ( *pIISP0A & BUFFER_MASK ) ) {
 			formatInput();
 			
-			delayWithFeedback(0);
-			firFilter();
+			//delayWithFeedback(0);
+			iirFilter();
+			//firFilter();
 			formatOutput();
 		}
 	}  
@@ -395,15 +410,14 @@ void clearDAIpins(void)
     SRU(LOW, PBEN20_I);
 }
 
+// ----------------------- FEEDBACK DELAY --------------------- //
+
 void delayWithFeedback(int delaySpeed) 
 {
 	// delay_ptr is putting what rx just took in into the delay_buffer.
 	// once the delay length is satisfied, dsp pointer is adding to the receive buffer what rx
 	// already put there PLUS what's just ahead of where delay_ptr is now. this way, 
 	// the desired delay time is satisfied constantly.
-	
-	
-	// ----------------- feedback w/ ints and floats ---------- //
 
 	if (delaySpeed > 0)
 		counter = (counter + 1) % delaySpeed;
@@ -422,6 +436,7 @@ void delayWithFeedback(int delaySpeed)
 
     return;
 }
+// ----------------------- FIR FILTER ---------------------- //
 
 void firFilter() {
 
@@ -436,6 +451,68 @@ void firFilter() {
 
 	return;              
 }
+// ----------------------- IIR FILTER ---------------------- //
+
+void iirFilter() {
+
+	int i;
+	
+	// accumulators for IIR filter
+	double acc_iir = 0.0;
+	double new_hist = 0.0;
+
+	// the two delay values in each stage
+	// turns out things have to be initialized - didn't and errors ensued
+	double history1 = 0.0;
+	double history2 = 0.0;	
+
+	// pointer to beginning of coeffsIIR array
+	double * coeffPtr = coeffsIIR;
+
+	// pointers to beginning two spots of history array
+	double * hist1Ptr = history;
+	double * hist2Ptr = history + 1;
+
+	// initial gain before going through each 2nd order IIR stage
+	acc_iir = gain*float_buffer[dsp];
+
+	for(i = 0; i < stages; i++ ) {
+
+		// fill delay elements with current stage's history values
+		history1 = *hist1Ptr;
+		history2 = *hist2Ptr;
+
+		//printf("history1 = %f\n",history1);
+
+		// poles 
+		acc_iir = acc_iir - (*coeffPtr++) * (history1);
+		new_hist = acc_iir - (*coeffPtr++) * (history2);
+
+		// zeros
+		acc_iir = acc_iir * (*coeffPtr++);
+		acc_iir = acc_iir + (*coeffPtr++) * (history1);
+		acc_iir = acc_iir + (*coeffPtr++) * (history2);
+
+		//printf("acc_iir = %f\n",acc_iir);
+
+		// shift in new delay element values for this stage
+		*hist2Ptr++ = *hist1Ptr;
+		*hist1Ptr++ = new_hist;
+
+		// leap frog over by two to be at right spot in next stage
+		hist1Ptr++;
+		hist2Ptr++;
+	}
+	
+
+	
+	// output accumulator contains the filtered sample for output
+	potato = acc_iir;
+
+	return;
+}
+
+// ----------------------- FORMAT INPUT ---------------------- //
 
 void formatInput(void){
 
@@ -446,6 +523,8 @@ void formatInput(void){
 
     return;
 }
+
+// ----------------------- FORMAT OUTPUT --------------------- //
 
 void formatOutput(void){
 
